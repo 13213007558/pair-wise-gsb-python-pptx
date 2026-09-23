@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+
 import pytest
 
+from pptx import Presentation
 from pptx.dml.fill import FillFormat
 from pptx.enum.text import MSO_ANCHOR
 from pptx.oxml.ns import qn
@@ -798,3 +801,131 @@ class Describe_RowCollection(object):
         tbl_cxml, expected_len = request.param
         rows = _RowCollection(element(tbl_cxml), None)
         return rows, expected_len
+
+
+class DescribeTableRowInsertDelete(object):
+    """Regression suite for `Table.insert_rows` and `Table.delete_rows`.
+
+    Exercises a table holding both a horizontal and a vertical merge through insert,
+    delete, save, and reopen.
+    """
+
+    def it_grows_a_vertical_merge_when_inserting_inside_it(self, merged_table_):
+        _, graphic_frame, table = merged_table_
+
+        table.insert_rows(2, height=300000, style_from=0)
+
+        assert len(table.rows) == 5
+        origin = table.cell(1, 1)
+        assert origin.is_merge_origin
+        assert origin.span_height == 3
+        assert origin.span_width == 2
+        # ---new row cells inside the range continue the merge---
+        assert table.cell(2, 1).is_spanned
+        assert table.cell(2, 2).is_spanned
+        # ---cells outside the range stay plain and empty---
+        assert not table.cell(2, 0).is_spanned
+        assert not table.cell(2, 0).is_merge_origin
+        assert table.cell(2, 1).text == ""
+        assert table.rows[2].height == 300000
+        assert graphic_frame.height == sum(row.height for row in table.rows)
+
+    def it_keeps_merge_range_when_inserting_at_its_boundary(self, merged_table_):
+        _, _, table = merged_table_
+
+        table.insert_rows(3, height=300000)
+
+        assert len(table.rows) == 5
+        assert table.cell(1, 1).span_height == 2
+        # ---new row does not copy vMerge/hMerge from the spanned row above---
+        assert table.cell(2, 1).is_spanned
+        assert not table.cell(3, 1).is_spanned
+        assert not table.cell(3, 2).is_spanned
+        assert not table.cell(3, 1).is_merge_origin
+
+    def it_raises_on_delete_intersecting_a_merge_by_default(self, merged_table_):
+        _, _, table = merged_table_
+
+        with pytest.raises(ValueError):
+            table.delete_rows(1)
+
+        # ---failed delete leaves no half-modified table behind---
+        assert len(table.rows) == 4
+        assert table.cell(1, 1).is_merge_origin
+        assert table.cell(1, 1).span_height == 2
+
+    def it_raises_on_invalid_arguments(self, merged_table_):
+        _, _, table = merged_table_
+
+        with pytest.raises(ValueError):
+            table.delete_rows(0, on_merge="explode")
+        with pytest.raises(ValueError):
+            table.delete_rows(0, count=0)
+        with pytest.raises(IndexError):
+            table.delete_rows(3, count=2)
+        with pytest.raises(IndexError):
+            table.insert_rows(5, height=300000)
+        with pytest.raises(IndexError):
+            table.insert_rows(0, style_from=4)
+        with pytest.raises(ValueError):
+            table.insert_rows(0)
+        with pytest.raises(ValueError):
+            table.insert_rows(0, count=-1)
+
+        assert len(table.rows) == 4
+        assert len(table.columns) == 3
+
+    def it_removes_a_merge_range_fully_covered_by_a_delete(self, merged_table_):
+        _, _, table = merged_table_
+
+        table.delete_rows(1, count=2, on_merge="shrink")
+
+        assert len(table.rows) == 2
+        for cell in table.iter_cells():
+            assert not cell.is_merge_origin
+            assert not cell.is_spanned
+
+    def it_shrinks_merge_and_survives_a_save_reopen_roundtrip(self, merged_table_):
+        prs, _, table = merged_table_
+
+        # ---insert inside the merge range, then delete the merge-origin row---
+        table.insert_rows(2, height=300000, style_from=0)
+        table.delete_rows(1, on_merge="shrink")
+
+        stream = BytesIO()
+        prs.save(stream)
+        stream.seek(0)
+        reloaded_frame = Presentation(stream).slides[0].shapes[0]
+        reloaded = reloaded_frame.table
+
+        # ---grid dimensions---
+        assert len(reloaded.rows) == 4
+        assert len(reloaded.columns) == 3
+        # ---origin content migrated to the new top-left cell of the range---
+        origin = reloaded.cell(1, 1)
+        assert origin.is_merge_origin
+        assert origin.text == "origin"
+        # ---span markers---
+        assert origin.span_height == 2
+        assert origin.span_width == 2
+        assert reloaded.cell(2, 1).is_spanned
+        assert reloaded.cell(2, 2).is_spanned
+        assert not reloaded.cell(1, 0).is_spanned
+        assert not reloaded.cell(3, 1).is_spanned
+        # ---shape height tracks the sum of row heights---
+        assert reloaded_frame.height == sum(row.height for row in reloaded.rows)
+
+    # fixtures -------------------------------------------------------
+
+    @pytest.fixture
+    def merged_table_(self):
+        """(prs, graphic_frame, table) with a 2x2 merge at rows/cols 1-2."""
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        graphic_frame = slide.shapes.add_table(
+            4, 3, Inches(1), Inches(1), Inches(3), Inches(2)
+        )
+        table = graphic_frame.table
+        table.cell(1, 1).merge(table.cell(2, 2))
+        table.cell(1, 1).text = "origin"
+        return prs, graphic_frame, table

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import TYPE_CHECKING, Iterator
 
 from pptx.dml.fill import FillFormat
@@ -94,6 +95,167 @@ class Table(object):
         """
         return (_Cell(tc, self) for tc in self._tbl.iter_tcs())
 
+    def delete_rows(
+        self, index: int, count: int = 1, on_merge: str = "error"
+    ) -> None:
+        """Remove `count` rows starting at row `index`.
+
+        `index` refers to the row grid as it exists before any rows are removed.
+
+        By default, deleting rows that intersect a merged-cell range raises |ValueError| and
+        leaves the table unchanged. Pass `on_merge="shrink"` to instead shrink each
+        intersected vertical merge range by the number of its rows being removed. When the
+        merge-origin row is removed but other rows of the range survive, the origin's text
+        and cell properties are moved to the new top-left cell of the remaining range. A
+        merge range whose rows are all removed is deleted along with them. Column spans and
+        column widths are not affected.
+
+        The table shape height is updated to the sum of the remaining row heights.
+        """
+        tr_lst = self._tbl.tr_lst
+        row_count = len(tr_lst)
+
+        if on_merge not in ("error", "shrink"):
+            raise ValueError("on_merge must be 'error' or 'shrink', got %r" % (on_merge,))
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            raise ValueError("count must be a positive integer, got %r" % (count,))
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise TypeError("index must be an integer, got %r" % (index,))
+        if not 0 <= index < row_count or index + count > row_count:
+            raise IndexError(
+                "row range [%d, %d) out of range for table with %d rows"
+                % (index, index + count, row_count)
+            )
+
+        end = index + count
+        affected = [
+            region
+            for region in self._merge_regions()
+            if region[0] < end and index < region[0] + region[2]
+        ]
+        if affected and on_merge == "error":
+            raise ValueError(
+                "row range intersects merged cell(s); pass on_merge='shrink' to shrink"
+                " the affected merge ranges"
+            )
+
+        # ---shrink intersected vertical merge ranges before removing rows---
+        for top, left, row_span, col_span in affected:
+            if row_span < 2:
+                # ---horizontal-only range lives in a deleted row; removed with it---
+                continue
+            bottom = top + row_span
+            removed = min(bottom, end) - max(top, index)
+            if removed >= row_span:
+                # ---entire range is deleted; nothing to shrink---
+                continue
+            new_span = row_span - removed
+            if top >= index:
+                # ---origin row is deleted; promote first surviving row of range---
+                new_top = min(bottom, end)
+                self._move_cell_content(
+                    tr_lst[top].tc_lst[left], tr_lst[new_top].tc_lst[left]
+                )
+                for col_idx in range(left, left + col_span):
+                    tc = tr_lst[new_top].tc_lst[col_idx]
+                    tc.rowSpan = new_span
+                    tc.vMerge = False
+                tr_lst[new_top].tc_lst[left].gridSpan = col_span
+            else:
+                for col_idx in range(left, left + col_span):
+                    tr_lst[top].tc_lst[col_idx].rowSpan = new_span
+
+        for tr in tr_lst[index:end]:
+            self._tbl.remove(tr)
+
+        self.notify_height_changed()
+
+    def insert_rows(
+        self,
+        index: int,
+        count: int = 1,
+        height: Length | None = None,
+        style_from: int | None = None,
+    ) -> None:
+        """Insert `count` new rows before row `index`.
+
+        `index` refers to the row grid as it exists before insertion; inserting at
+        `index == len(rows)` appends after the last row.
+
+        Each new row gets `height` (an EMU |Length|). When `height` is |None|, the
+        height of the `style_from` row is used. When `style_from` (a row index in the
+        pre-insertion grid) is given, each new cell copies the cell properties (fill,
+        margins, anchor) of the corresponding cell in that row; text, hyperlinks, and
+        merge relationships are never copied.
+
+        A vertical merge range whose interior strictly contains the insertion point is
+        grown by `count` rows; a range that merely borders the insertion point is left
+        unchanged. New rows never inherit hMerge/vMerge markers from neighboring rows.
+
+        The table shape height is updated to the sum of all row heights.
+        """
+        tr_lst = self._tbl.tr_lst
+        row_count = len(tr_lst)
+
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            raise ValueError("count must be a positive integer, got %r" % (count,))
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise TypeError("index must be an integer, got %r" % (index,))
+        if not 0 <= index <= row_count:
+            raise IndexError(
+                "insert position %d out of range for table with %d rows"
+                % (index, row_count)
+            )
+        if style_from is not None and not 0 <= style_from < row_count:
+            raise IndexError(
+                "style_from row index %d out of range for table with %d rows"
+                % (style_from, row_count)
+            )
+        if height is None:
+            if style_from is None:
+                raise ValueError(
+                    "height is required when no style_from row is specified"
+                )
+            height = tr_lst[style_from].h
+        if not isinstance(height, int) or isinstance(height, bool):
+            raise TypeError("height must be an integer EMU value, got %r" % (height,))
+
+        # ---grow vertical merge ranges whose interior contains the insertion point---
+        grown = []
+        for top, left, row_span, col_span in self._merge_regions():
+            if top < index < top + row_span:
+                for tc in tr_lst[top].tc_lst[left : left + col_span]:
+                    tc.rowSpan = row_span + count
+                grown.append((left, col_span))
+
+        # ---build new rows; merge markers are never copied from neighboring rows---
+        col_count = len(self._tbl.tblGrid.gridCol_lst)
+        style_tr = tr_lst[style_from] if style_from is not None else None
+        anchor_tr = tr_lst[index] if index < row_count else None
+        for _ in range(count):
+            tr = self._tbl.add_tr(Emu(height))
+            for col_idx in range(col_count):
+                tc = tr.add_tc()
+                if style_tr is not None:
+                    src_tcPr = style_tr.tc_lst[col_idx].tcPr
+                    if src_tcPr is None:
+                        if tc.tcPr is not None:
+                            tc.remove(tc.tcPr)
+                    else:
+                        tc.replace(tc.tcPr, deepcopy(src_tcPr))
+            for left, col_span in grown:
+                for col_idx in range(left, left + col_span):
+                    tc = tr.tc_lst[col_idx]
+                    tc.vMerge = True
+                    if col_idx == left:
+                        tc.gridSpan = col_span
+                    else:
+                        tc.hMerge = True
+            if anchor_tr is not None:
+                anchor_tr.addprevious(tr)
+
+        self.notify_height_changed()
+
     @property
     def last_col(self) -> bool:
         """When `True`, indicates the rightmost column should have distinct formatting.
@@ -163,6 +325,29 @@ class Table(object):
     @vert_banding.setter
     def vert_banding(self, value: bool):
         self._tbl.bandCol = value
+
+    def _merge_regions(self) -> list[tuple[int, int, int, int]]:
+        """List of (top, left, row_span, col_span) tuples, one per merged-cell range."""
+        return [
+            (tc.row_idx, tc.col_idx, tc.rowSpan, tc.gridSpan)
+            for tc in self._tbl.iter_tcs()
+            if tc.is_merge_origin
+        ]
+
+    @staticmethod
+    def _move_cell_content(src_tc: CT_TableCell, dst_tc: CT_TableCell) -> None:
+        """Move text body and cell properties from `src_tc` to `dst_tc`."""
+        src_txBody = src_tc.get_or_add_txBody()
+        src_tcPr = src_tc.tcPr
+        if dst_tc.txBody is not None:
+            dst_tc.remove(dst_tc.txBody)
+        if dst_tc.tcPr is not None:
+            dst_tc.remove(dst_tc.tcPr)
+        src_tc.remove(src_txBody)
+        dst_tc.insert(0, src_txBody)
+        if src_tcPr is not None:
+            src_tc.remove(src_tcPr)
+            dst_tc.insert(1, src_tcPr)
 
 
 class _Cell(Subshape):
