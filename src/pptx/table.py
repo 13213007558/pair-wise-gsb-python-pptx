@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import TYPE_CHECKING, Iterator
 
 from pptx.dml.fill import FillFormat
@@ -17,6 +18,20 @@ if TYPE_CHECKING:
     from pptx.shapes.graphfrm import GraphicFrame
     from pptx.types import ProvidesPart
     from pptx.util import Length
+
+
+def _migrate_cell_content(src_tc: CT_TableCell, dst_tc: CT_TableCell) -> None:
+    """Move text body and cell properties from `src_tc` to `dst_tc`.
+
+    Any content already in `dst_tc` is discarded. The `a:txBody`, `a:tcPr`, and any other
+    child elements are moved (not copied), so `src_tc` is left empty and should be discarded
+    along with its containing row.
+    """
+    for child in list(dst_tc):
+        dst_tc.remove(child)
+    for child in list(src_tc):
+        src_tc.remove(child)
+        dst_tc.append(child)
 
 
 class Table(object):
@@ -93,6 +108,170 @@ class Table(object):
         Each grid cell is generated in left-to-right, top-to-bottom order.
         """
         return (_Cell(tc, self) for tc in self._tbl.iter_tcs())
+
+    def insert_rows(
+        self,
+        row_idx: int,
+        count: int = 1,
+        height: Length | None = None,
+        style_from: int | None = None,
+    ) -> None:
+        """Insert `count` new rows before row `row_idx`.
+
+        `row_idx` is zero-based and refers to the grid as it is before this call; the value
+        `len(self.rows)` appends the new rows at the bottom of the table.
+
+        `height` is the height of each inserted row in EMU. When |None|, the height is taken
+        from the `style_from` row when given, otherwise from the row currently at `row_idx`
+        (the last row when appending at the bottom).
+
+        `style_from` is an optional row index (also on the pre-insertion grid) whose cell
+        properties (`a:tcPr`, e.g. fill, margins, borders, anchor) are copied to the new rows.
+        Text, hyperlinks, and merge relationships are never copied; the new cells are always
+        plain, unmerged cells.
+
+        A vertical merge region is expanded (its `rowSpan` grows by `count`) when the
+        insertion point falls strictly inside it; a region touched only at its top or bottom
+        boundary is left unchanged. Horizontal spans and column widths are not affected. The
+        table shape height is updated to the sum of all row heights.
+        """
+        tbl = self._tbl
+        tr_lst = tbl.tr_lst
+        row_count = len(tr_lst)
+        col_count = len(tbl.tblGrid.gridCol_lst)
+
+        if not 0 <= row_idx <= row_count:
+            raise IndexError(
+                "row insertion index %d out of range for table with %d rows"
+                % (row_idx, row_count)
+            )
+        if not isinstance(count, int) or count < 1:
+            raise ValueError("count must be a positive integer, got %r" % (count,))
+        if style_from is not None and not 0 <= style_from < row_count:
+            raise IndexError(
+                "style_from row index %d out of range for table with %d rows"
+                % (style_from, row_count)
+            )
+        if height is not None and (not isinstance(height, int) or height <= 0):
+            raise ValueError("height must be a positive integer EMU value, got %r" % (height,))
+
+        if height is None:
+            if style_from is not None:
+                height = tr_lst[style_from].h
+            elif row_idx < row_count:
+                height = tr_lst[row_idx].h
+            elif row_count > 0:
+                height = tr_lst[-1].h
+            else:
+                raise ValueError("height is required when inserting into an empty table")
+
+        template_tcs = tr_lst[style_from].tc_lst if style_from is not None else None
+
+        # ---expand vertical merge regions whose interior spans the insertion point---
+        for tc in tbl.iter_tcs():
+            if tc.rowSpan > 1 and not tc.vMerge:
+                top = tc.row_idx
+                if top < row_idx < top + tc.rowSpan:
+                    tc.rowSpan = tc.rowSpan + count
+
+        # ---build the new rows, copying only cell properties from the style row---
+        new_trs = []
+        for _ in range(count):
+            tr = tbl.add_tr(height)
+            for col_idx in range(col_count):
+                tc = tr.add_tc()
+                if template_tcs is None or col_idx >= len(template_tcs):
+                    continue
+                src_tcPr = template_tcs[col_idx].tcPr
+                if src_tcPr is not None:
+                    tc.remove(tc.get_or_add_tcPr())
+                    tc.append(copy.deepcopy(src_tcPr))
+            new_trs.append(tr)
+
+        # ---move the new rows from the end of `a:tbl` to the insertion point---
+        if row_idx < row_count:
+            anchor_tr = tr_lst[row_idx]
+            for tr in new_trs:
+                anchor_tr.addprevious(tr)
+
+        self.notify_height_changed()
+
+    def delete_rows(self, row_idx: int, count: int = 1, merge_strategy: str = "error") -> None:
+        """Delete `count` rows starting at row `row_idx`.
+
+        `row_idx` is zero-based and refers to the grid as it is before this call.
+
+        `merge_strategy` determines how merged cell regions intersecting the deleted rows are
+        handled. The default `"error"` raises |ValueError| when any merged region is touched,
+        leaving the table unchanged. `"shrink"` instead shrinks each intersected region by the
+        number of deleted rows it spans; when the merge-origin row is deleted but part of the
+        region survives, the origin's text and cell properties are migrated to the region's
+        new top-left cell. A region entirely covered by the deleted rows is removed along with
+        them.
+
+        Horizontal spans and column widths are not affected. The table shape height is updated
+        to the sum of the remaining row heights.
+        """
+        tbl = self._tbl
+        tr_lst = tbl.tr_lst
+        row_count = len(tr_lst)
+
+        if merge_strategy not in ("error", "shrink"):
+            raise ValueError(
+                "merge_strategy must be 'error' or 'shrink', got %r" % (merge_strategy,)
+            )
+        if not isinstance(count, int) or count < 1:
+            raise ValueError("count must be a positive integer, got %r" % (count,))
+        if not 0 <= row_idx < row_count:
+            raise IndexError(
+                "row index %d out of range for table with %d rows" % (row_idx, row_count)
+            )
+        if row_idx + count > row_count:
+            raise ValueError(
+                "delete range (%d rows from row %d) exceeds table row count of %d"
+                % (count, row_idx, row_count)
+            )
+
+        first, last = row_idx, row_idx + count  # ---deleted rows are [first, last)---
+
+        affected_origins = [
+            tc
+            for tc in tbl.iter_tcs()
+            if tc.is_merge_origin and tc.row_idx < last and tc.row_idx + tc.rowSpan > first
+        ]
+        if affected_origins and merge_strategy == "error":
+            raise ValueError(
+                "delete range intersects %d merged cell region(s); use"
+                " merge_strategy='shrink' to shrink or remove them" % len(affected_origins)
+            )
+
+        # ---shrink intersected merge regions, using pre-deletion grid indexes throughout---
+        for origin_tc in affected_origins:
+            top, left = origin_tc.row_idx, origin_tc.col_idx
+            span, width = origin_tc.rowSpan, origin_tc.gridSpan
+            removed = min(top + span, last) - max(top, first)
+            if removed >= span:
+                continue  # ---region is entirely deleted along with its rows---
+            new_span = span - removed
+            if top >= first:
+                # ---origin row is deleted; migrate its content to the new top-left cell---
+                new_top = last
+                _migrate_cell_content(origin_tc, tbl.tc(new_top, left))
+            else:
+                new_top = top
+            for offset, tc in enumerate(tr_lst[new_top].tc_lst[left : left + width]):
+                tc.rowSpan = new_span
+                tc.vMerge = False
+                if top >= first:
+                    if offset == 0:
+                        tc.gridSpan = width
+                    else:
+                        tc.hMerge = True
+
+        for tr in tr_lst[first:last]:
+            tbl.remove(tr)
+
+        self.notify_height_changed()
 
     @property
     def last_col(self) -> bool:

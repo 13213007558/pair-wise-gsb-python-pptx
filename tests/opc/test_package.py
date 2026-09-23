@@ -514,7 +514,11 @@ class DescribePartFactory:
         SlidePart_ = class_mock(request, "pptx.opc.package.XmlPart")
         SlidePart_.load.return_value = part_
         partname = PackURI("/ppt/slides/slide7.xml")
+        original_part_cls = PartFactory.part_type_for[CT.PML_SLIDE]
         PartFactory.part_type_for[CT.PML_SLIDE] = SlidePart_
+        request.addfinalizer(
+            lambda: PartFactory.part_type_for.update({CT.PML_SLIDE: original_part_cls})
+        )
 
         part = PartFactory(partname, CT.PML_SLIDE, package_, b"blob")
 

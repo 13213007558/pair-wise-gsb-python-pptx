@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+
 import pytest
 
+from pptx import Presentation
 from pptx.dml.fill import FillFormat
 from pptx.enum.text import MSO_ANCHOR
 from pptx.oxml.ns import qn
@@ -798,3 +801,148 @@ class Describe_RowCollection(object):
         tbl_cxml, expected_len = request.param
         rows = _RowCollection(element(tbl_cxml), None)
         return rows, expected_len
+
+
+class DescribeTableRowInsertDelete(object):
+    """Regression suite for `Table.insert_rows` and `Table.delete_rows`."""
+
+    def it_maintains_merge_regions_across_insert_delete_and_roundtrip(self):
+        prs, graphic_frame, table = self._table_fixture(rows=4, cols=3)
+        # ---horizontal-only merge on row 0, 3x2 horizontal+vertical merge below it---
+        table.cell(0, 0).merge(table.cell(0, 1))
+        table.cell(1, 1).merge(table.cell(3, 2))
+        table.cell(1, 1).text = "origin-text"
+        table.cell(1, 1).vertical_anchor = MSO_ANCHOR.MIDDLE
+        table.cell(0, 2).text = "template-text"
+        table.cell(0, 2).vertical_anchor = MSO_ANCHOR.BOTTOM
+
+        # ---insert strictly inside the vertical merge region---
+        table.insert_rows(2, count=1, height=300000, style_from=0)
+
+        assert len(table.rows) == 5
+        assert table.cell(1, 1).span_height == 4  # ---region grew by one row---
+        assert table.rows[2].height == 300000
+        # ---style is copied, but not text or merge relationships---
+        assert table.cell(2, 2).vertical_anchor == MSO_ANCHOR.BOTTOM
+        assert table.cell(2, 2).text == ""
+        assert not table.cell(2, 1).is_spanned
+        assert not table.cell(2, 1).is_merge_origin
+        assert graphic_frame.height == 457200 * 4 + 300000
+
+        # ---default strategy refuses to touch merged regions, leaving no half state---
+        with pytest.raises(ValueError, match="merge_strategy='shrink'"):
+            table.delete_rows(0, 1)
+        assert len(table.rows) == 5
+        assert table.cell(1, 1).span_height == 4
+
+        # ---delete the merge-origin row with shrink---
+        table.delete_rows(1, 1, merge_strategy="shrink")
+
+        assert len(table.rows) == 4
+        new_origin = table.cell(1, 1)
+        assert new_origin.is_merge_origin
+        assert new_origin.span_height == 3
+        assert new_origin.span_width == 2
+        assert new_origin.text == "origin-text"
+        assert new_origin.vertical_anchor == MSO_ANCHOR.MIDDLE
+        assert table.cell(1, 2)._tc.hMerge
+        assert table.cell(2, 1)._tc.vMerge
+        assert table.cell(3, 2).is_spanned
+        assert graphic_frame.height == sum(row.height for row in table.rows)
+
+        # ---save and reopen; grid, origin, span markers, and heights survive---
+        stream = BytesIO()
+        prs.save(stream)
+        stream.seek(0)
+        reloaded_frame = Presentation(stream).slides[0].shapes[0]
+        reloaded = reloaded_frame.table
+
+        assert len(reloaded.rows) == 4
+        assert len(reloaded.columns) == 3
+        origin = reloaded.cell(1, 1)
+        assert origin.is_merge_origin
+        assert origin.span_height == 3
+        assert origin.span_width == 2
+        assert origin.text == "origin-text"
+        assert reloaded.cell(1, 2)._tc.hMerge
+        assert reloaded.cell(2, 1)._tc.vMerge
+        assert reloaded.cell(0, 0).span_width == 2  # ---horizontal merge untouched---
+        assert reloaded.rows[1].height == 300000
+        assert reloaded_frame.height == sum(row.height for row in reloaded.rows)
+
+    def it_keeps_region_on_boundary_insert_but_expands_on_interior_insert(self):
+        _, _, table = self._table_fixture(rows=3, cols=2)
+        table.cell(1, 0).merge(table.cell(2, 0))
+
+        table.insert_rows(1)  # ---top boundary: region shifts down unchanged---
+        assert len(table.rows) == 4
+        assert table.cell(2, 0).span_height == 2
+
+        table.insert_rows(4)  # ---bottom boundary (append): region unchanged---
+        assert len(table.rows) == 5
+        assert table.cell(2, 0).span_height == 2
+
+        table.insert_rows(3)  # ---strictly inside: rowSpan grows---
+        assert len(table.rows) == 6
+        assert table.cell(2, 0).span_height == 3
+        assert not table.cell(3, 0).is_spanned  # ---new row gets no vMerge marker---
+
+    def it_removes_region_entirely_when_all_its_rows_are_deleted(self):
+        _, graphic_frame, table = self._table_fixture(rows=4, cols=2)
+        table.cell(1, 0).merge(table.cell(2, 1))
+        table.cell(1, 0).text = "doomed"
+
+        table.delete_rows(1, 2, merge_strategy="shrink")
+
+        assert len(table.rows) == 2
+        assert all(not cell.is_merge_origin and not cell.is_spanned for cell in table.iter_cells())
+        assert graphic_frame.height == sum(row.height for row in table.rows)
+
+    def it_shrinks_region_from_below_when_origin_survives(self):
+        _, _, table = self._table_fixture(rows=4, cols=2)
+        table.cell(0, 0).merge(table.cell(2, 0))
+        table.cell(0, 0).text = "survivor"
+
+        table.delete_rows(2, 2, merge_strategy="shrink")
+
+        assert len(table.rows) == 2
+        origin = table.cell(0, 0)
+        assert origin.is_merge_origin
+        assert origin.span_height == 2
+        assert origin.text == "survivor"
+        assert table.cell(1, 0)._tc.vMerge
+
+    def it_validates_arguments_before_mutating(self):
+        _, graphic_frame, table = self._table_fixture(rows=3, cols=2)
+        before_height = graphic_frame.height
+
+        with pytest.raises(ValueError, match="merge_strategy"):
+            table.delete_rows(0, merge_strategy="bogus")
+        with pytest.raises(IndexError):
+            table.delete_rows(3)
+        with pytest.raises(ValueError, match="exceeds"):
+            table.delete_rows(2, 2)
+        with pytest.raises(ValueError, match="count"):
+            table.delete_rows(0, 0)
+        with pytest.raises(IndexError):
+            table.insert_rows(4)
+        with pytest.raises(ValueError, match="count"):
+            table.insert_rows(0, count=0)
+        with pytest.raises(ValueError, match="height"):
+            table.insert_rows(0, height=-1)
+        with pytest.raises(IndexError):
+            table.insert_rows(0, style_from=3)
+
+        assert len(table.rows) == 3
+        assert graphic_frame.height == before_height
+
+    # fixtures -------------------------------------------------------
+
+    def _table_fixture(self, rows, cols):
+        """(Presentation, GraphicFrame, Table) triple for a new blank-slide table."""
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        graphic_frame = slide.shapes.add_table(
+            rows, cols, Inches(1), Inches(1), Inches(3), Inches(2)
+        )
+        return prs, graphic_frame, graphic_frame.table
