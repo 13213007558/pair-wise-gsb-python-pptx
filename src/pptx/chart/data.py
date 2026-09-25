@@ -11,7 +11,8 @@ from pptx.chart.xlsx import (
     CategoryWorkbookWriter,
     XyWorkbookWriter,
 )
-from pptx.chart.xmlwriter import ChartXmlWriter
+from pptx.chart.xmlwriter import ChartXmlWriter, ComboChartXmlWriter
+from pptx.enum.chart import XL_CHART_TYPE
 from pptx.util import lazyproperty
 
 
@@ -123,6 +124,8 @@ class _BaseChartData(Sequence):
         a complete XML document, including an XML declaration specifying
         UTF-8 encoding.
         """
+        if getattr(self, "is_combo_chart_data", False):
+            return ComboChartXmlWriter(self).xml
         return ChartXmlWriter(chart_type, self).xml
 
 
@@ -629,6 +632,98 @@ class ChartData(CategoryChartData):
     for creating or replacing the data in chart types other than XY and
     Bubble.
     """
+
+
+class ComboPlotData(object):
+    """Data and chart-type assignment for one plot in a combo chart."""
+
+    def __init__(self, chart_data, chart_type, secondary_axis=False, number_format=None):
+        self._chart_data = chart_data
+        self._chart_type = chart_type
+        self._secondary_axis = bool(secondary_axis)
+        self._number_format = number_format
+        self._series = []
+
+    def add_series(self, name, values=(), number_format=None):
+        """Add a category-chart series and assign it to this plot."""
+        series_data = CategoryChartData.add_series(
+            self._chart_data, name, values, number_format
+        )
+        self._series.append(series_data)
+        return series_data
+
+    @property
+    def axis_group(self):
+        """0 denotes the primary value axis and 1 denotes the secondary axis."""
+        return 1 if self._secondary_axis else 0
+
+    @property
+    def chart_type(self):
+        """Member of :ref:`XlChartType` used to draw this plot."""
+        return self._chart_type
+
+    @property
+    def number_format(self):
+        """Number format for a value axis newly created for this plot."""
+        return self._number_format
+
+    @property
+    def series(self):
+        """Series assigned to this plot, in plot order."""
+        return tuple(self._series)
+
+
+class ComboChartData(CategoryChartData):
+    """Category chart data whose series can be assigned to multiple plots.
+
+    All plots share the same category axis. Each plot can use either the primary
+    value axis or an independent secondary value axis.
+    """
+
+    _SUPPORTED_CHART_TYPES = frozenset(
+        (
+            XL_CHART_TYPE.BAR_CLUSTERED,
+            XL_CHART_TYPE.BAR_STACKED,
+            XL_CHART_TYPE.BAR_STACKED_100,
+            XL_CHART_TYPE.COLUMN_CLUSTERED,
+            XL_CHART_TYPE.COLUMN_STACKED,
+            XL_CHART_TYPE.COLUMN_STACKED_100,
+            XL_CHART_TYPE.LINE,
+            XL_CHART_TYPE.LINE_MARKERS,
+            XL_CHART_TYPE.LINE_MARKERS_STACKED,
+            XL_CHART_TYPE.LINE_MARKERS_STACKED_100,
+            XL_CHART_TYPE.LINE_STACKED,
+            XL_CHART_TYPE.LINE_STACKED_100,
+        )
+    )
+
+    def __init__(self, number_format="General"):
+        super(ComboChartData, self).__init__(number_format)
+        self._plots = []
+
+    def add_plot(self, chart_type, secondary_axis=False, number_format=None):
+        """Add and return a plot using *chart_type* and an axis assignment."""
+        if chart_type not in self._SUPPORTED_CHART_TYPES:
+            raise ValueError("unsupported combo chart plot type %s" % chart_type)
+        if not self.categories:
+            raise ValueError("set categories before adding a combo-chart plot")
+        plot_data = ComboPlotData(self, chart_type, secondary_axis, number_format)
+        self._plots.append(plot_data)
+        return plot_data
+
+    def add_series(self, name, values=(), number_format=None):
+        """Raise; combo-chart series must be added through a plot."""
+        raise TypeError("add series to a plot returned by add_plot()")
+
+    @property
+    def is_combo_chart_data(self):
+        """Marker used by XML and update factories to select combo behavior."""
+        return True
+
+    @property
+    def plots(self):
+        """Sequence of combo-plot data objects, back-to-front drawing order."""
+        return tuple(self._plots)
 
 
 class CategorySeriesData(_BaseSeriesData):

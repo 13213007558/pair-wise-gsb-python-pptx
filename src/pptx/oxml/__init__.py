@@ -184,6 +184,7 @@ from pptx.oxml.chart.shared import (  # noqa: E402
 
 register_element_cls("c:autoTitleDeleted", CT_Boolean_Explicit)
 register_element_cls("c:autoUpdate", CT_Boolean)
+register_element_cls("c:axId", CT_UnsignedInt)
 register_element_cls("c:bubble3D", CT_Boolean)
 register_element_cls("c:crossAx", CT_UnsignedInt)
 register_element_cls("c:crossesAt", CT_Double)

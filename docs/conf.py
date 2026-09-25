@@ -137,6 +137,7 @@ rst_epilog = """
 .. |CategoryAxis| replace:: :class:`.CategoryAxis`
 
 .. |CategoryChartData| replace:: :class:`.CategoryChartData`
+.. |ComboChartData| replace:: :class:`.ComboChartData`
 
 .. |CategoryLevel| replace:: :class:`.CategoryLevel`
 

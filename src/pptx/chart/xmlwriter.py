@@ -7,7 +7,7 @@ from xml.sax.saxutils import escape
 
 from pptx.enum.chart import XL_CHART_TYPE
 from pptx.oxml import parse_xml
-from pptx.oxml.ns import nsdecls
+from pptx.oxml.ns import nsdecls, qn
 
 
 def ChartXmlWriter(chart_type, chart_data):
@@ -58,6 +58,9 @@ def SeriesXmlRewriterFactory(chart_type, chart_data):
     Return a |_BaseSeriesXmlRewriter| subclass appropriate to *chart_type*.
     """
     XL_CT = XL_CHART_TYPE
+
+    if getattr(chart_data, "is_combo_chart_data", False):
+        return _ComboCategorySeriesXmlRewriter(chart_data)
 
     RewriterCls = {
         # There are 73 distinct chart types, only specify non-category
@@ -140,7 +143,7 @@ class _BaseSeriesXmlWriter(object):
         in the overall data point sequence of the chart and is started at
         *offset*.
         """
-        xml = ('                <c:ptCount val="{pt_count}"/>\n').format(pt_count=len(values))
+        xml = f'                <c:ptCount val="{len(values)}"/>\n'
 
         pt_tmpl = (
             '                <c:pt idx="{idx}">\n'
@@ -893,6 +896,328 @@ class _LineChartXmlWriter(_BaseChartXmlWriter):
                 }
             )
         return xml
+
+
+class ComboChartXmlWriter(object):
+    """Generate XML for a category chart containing multiple xChart plots."""
+
+    CAT_AX_ID = 1
+    PRIMARY_VAL_AX_ID = 2
+    SECONDARY_VAL_AX_ID = 3
+
+    def __init__(self, chart_data):
+        super(ComboChartXmlWriter, self).__init__()
+        self._chart_data = chart_data
+
+    @property
+    def xml(self):
+        return (
+            "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>\n"
+            '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawin'
+            'gml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/draw'
+            'ingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/off'
+            'iceDocument/2006/relationships">\n'
+            '  <c:date1904 val="0"/>\n'
+            "  <c:chart>\n"
+            '    <c:autoTitleDeleted val="0"/>\n'
+            "    <c:plotArea>\n"
+            "      <c:layout/>\n"
+            "{plots_xml}"
+            "{cat_ax_xml}"
+            "{val_axes_xml}"
+            "    </c:plotArea>\n"
+            "    <c:legend>\n"
+            '      <c:legendPos val="r"/>\n'
+            "      <c:layout/>\n"
+            '      <c:overlay val="0"/>\n'
+            "    </c:legend>\n"
+            '    <c:plotVisOnly val="1"/>\n'
+            '    <c:dispBlanksAs val="gap"/>\n'
+            '    <c:showDLblsOverMax val="0"/>\n'
+            "  </c:chart>\n"
+            "  <c:txPr>\n"
+            "    <a:bodyPr/>\n"
+            "    <a:lstStyle/>\n"
+            "    <a:p>\n"
+            "      <a:pPr>\n"
+            '        <a:defRPr sz="1800"/>\n'
+            "      </a:pPr>\n"
+            '      <a:endParaRPr lang="en-US"/>\n'
+            "    </a:p>\n"
+            "  </c:txPr>\n"
+            "</c:chartSpace>\n"
+        ).format(
+            **{
+                "plots_xml": self._plots_xml,
+                "cat_ax_xml": self._cat_ax_xml,
+                "val_axes_xml": self._val_axes_xml,
+            }
+        )
+
+    def _bar_plot_xml(self, plot_data):
+        chart_type = plot_data.chart_type
+        if chart_type in (
+            XL_CHART_TYPE.BAR_CLUSTERED,
+            XL_CHART_TYPE.COLUMN_CLUSTERED,
+        ):
+            grouping = "clustered"
+            overlap_xml = ""
+        elif chart_type in (XL_CHART_TYPE.BAR_STACKED, XL_CHART_TYPE.COLUMN_STACKED):
+            grouping = "stacked"
+            overlap_xml = '        <c:overlap val="100"/>\n'
+        else:
+            grouping = "percentStacked"
+            overlap_xml = '        <c:overlap val="100"/>\n'
+
+        bar_dir = "bar" if chart_type in (
+            XL_CHART_TYPE.BAR_CLUSTERED,
+            XL_CHART_TYPE.BAR_STACKED,
+            XL_CHART_TYPE.BAR_STACKED_100,
+        ) else "col"
+        val_ax_id = self._val_ax_id(plot_data)
+
+        return (
+            "      <c:barChart>\n"
+            '        <c:barDir val="{bar_dir}"/>\n'
+            '        <c:grouping val="{grouping}"/>\n'
+            '        <c:varyColors val="0"/>\n'
+            "{ser_xml}"
+            '        <c:gapWidth val="150"/>\n'
+            "{overlap_xml}"
+            '        <c:axId val="{cat_ax_id}"/>\n'
+            '        <c:axId val="{val_ax_id}"/>\n'
+            "      </c:barChart>\n"
+        ).format(
+            **{
+                "bar_dir": bar_dir,
+                "grouping": grouping,
+                "ser_xml": self._series_xml(plot_data, False),
+                "overlap_xml": overlap_xml,
+                "cat_ax_id": self.CAT_AX_ID,
+                "val_ax_id": val_ax_id,
+            }
+        )
+
+    @property
+    def _cat_ax_position(self):
+        for plot_data in self._chart_data.plots:
+            if plot_data.chart_type in (
+                XL_CHART_TYPE.BAR_CLUSTERED,
+                XL_CHART_TYPE.BAR_STACKED,
+                XL_CHART_TYPE.BAR_STACKED_100,
+            ):
+                return "l"
+            break
+        return "b"
+
+    @property
+    def _cat_ax_xml(self):
+        categories = self._chart_data.categories
+        ax_pos = self._cat_ax_position
+        axis_tag = "dateAx" if categories.are_dates else "catAx"
+        num_fmt_xml = (
+            f'        <c:numFmt formatCode="{categories.number_format}" sourceLinked="1"/>\n'
+            if categories.are_dates
+            else ""
+        )
+        date_xml = (
+            '        <c:auto val="1"/>\n'
+            '        <c:lblOffset val="100"/>\n'
+            '        <c:baseTimeUnit val="days"/>\n'
+            if categories.are_dates
+            else (
+                '        <c:auto val="1"/>\n'
+                '        <c:lblAlgn val="ctr"/>\n'
+                '        <c:lblOffset val="100"/>\n'
+                '        <c:noMultiLvlLbl val="0"/>\n'
+            )
+        )
+        return (
+            "      <c:{axis_tag}>\n"
+            '        <c:axId val="{ax_id}"/>\n'
+            "        <c:scaling>\n"
+            '          <c:orientation val="minMax"/>\n'
+            "        </c:scaling>\n"
+            '        <c:delete val="0"/>\n'
+            '        <c:axPos val="{ax_pos}"/>\n'
+            "{num_fmt_xml}"
+            '        <c:majorTickMark val="out"/>\n'
+            '        <c:minorTickMark val="none"/>\n'
+            '        <c:tickLblPos val="nextTo"/>\n'
+            '        <c:crossAx val="{cross_ax_id}"/>\n'
+            '        <c:crosses val="autoZero"/>\n'
+            "{date_xml}"
+            "      </c:{axis_tag}>\n"
+        ).format(
+            **{
+                "axis_tag": axis_tag,
+                "ax_id": self.CAT_AX_ID,
+                "ax_pos": ax_pos,
+                "num_fmt_xml": num_fmt_xml,
+                "cross_ax_id": self.PRIMARY_VAL_AX_ID,
+                "date_xml": date_xml,
+            }
+        )
+
+    def _line_marker_xml(self, chart_type):
+        if chart_type in (
+            XL_CHART_TYPE.LINE,
+            XL_CHART_TYPE.LINE_STACKED,
+            XL_CHART_TYPE.LINE_STACKED_100,
+        ):
+            return (
+                "          <c:marker>\n"
+                '            <c:symbol val="none"/>\n'
+                "          </c:marker>\n"
+            )
+        return ""
+
+    def _line_plot_xml(self, plot_data):
+        chart_type = plot_data.chart_type
+        if chart_type in (XL_CHART_TYPE.LINE, XL_CHART_TYPE.LINE_MARKERS):
+            grouping = "standard"
+        elif chart_type in (XL_CHART_TYPE.LINE_STACKED, XL_CHART_TYPE.LINE_MARKERS_STACKED):
+            grouping = "stacked"
+        else:
+            grouping = "percentStacked"
+
+        return (
+            "      <c:lineChart>\n"
+            '        <c:grouping val="{grouping}"/>\n'
+            '        <c:varyColors val="0"/>\n'
+            "{ser_xml}"
+            '        <c:marker val="1"/>\n'
+            '        <c:smooth val="0"/>\n'
+            '        <c:axId val="{cat_ax_id}"/>\n'
+            '        <c:axId val="{val_ax_id}"/>\n'
+            "      </c:lineChart>\n"
+        ).format(
+            **{
+                "grouping": grouping,
+                "ser_xml": self._series_xml(plot_data, True),
+                "cat_ax_id": self.CAT_AX_ID,
+                "val_ax_id": self._val_ax_id(plot_data),
+            }
+        )
+
+    @property
+    def _plots_xml(self):
+        xml = ""
+        for plot_data in self._chart_data.plots:
+            tag = self._plot_tag(plot_data.chart_type)
+            if tag == "c:barChart":
+                xml += self._bar_plot_xml(plot_data)
+            else:
+                xml += self._line_plot_xml(plot_data)
+        return xml
+
+    def _plot_tag(self, chart_type):
+        bar_types = (
+            XL_CHART_TYPE.BAR_CLUSTERED,
+            XL_CHART_TYPE.BAR_STACKED,
+            XL_CHART_TYPE.BAR_STACKED_100,
+            XL_CHART_TYPE.COLUMN_CLUSTERED,
+            XL_CHART_TYPE.COLUMN_STACKED,
+            XL_CHART_TYPE.COLUMN_STACKED_100,
+        )
+        return "c:barChart" if chart_type in bar_types else "c:lineChart"
+
+    def _series_xml(self, plot_data, is_line):
+        xml = ""
+        for series_data in plot_data.series:
+            xml_writer = _CategorySeriesXmlWriter(series_data)
+            marker_xml = self._line_marker_xml(plot_data.chart_type) if is_line else ""
+            smooth_xml = '          <c:smooth val="0"/>\n' if is_line else ""
+            xml += (
+                "        <c:ser>\n"
+                '          <c:idx val="{ser_idx}"/>\n'
+                '          <c:order val="{ser_order}"/>\n'
+                "{tx_xml}"
+                "{marker_xml}"
+                "{cat_xml}"
+                "{val_xml}"
+                "{smooth_xml}"
+                "        </c:ser>\n"
+            ).format(
+                **{
+                    "ser_idx": series_data.index,
+                    "ser_order": series_data.index,
+                    "tx_xml": xml_writer.tx_xml,
+                    "marker_xml": marker_xml,
+                    "cat_xml": xml_writer.cat_xml,
+                    "val_xml": xml_writer.val_xml,
+                    "smooth_xml": smooth_xml,
+                }
+            )
+        return xml
+
+    @property
+    def _val_axes_xml(self):
+        secondary_plot = next(
+            (plot for plot in self._chart_data.plots if plot.axis_group == 1), None
+        )
+        primary_pos = self._primary_val_ax_position
+        xml = self._val_ax_xml(self.PRIMARY_VAL_AX_ID, primary_pos, "autoZero", None, True)
+        if secondary_plot is not None:
+            xml += self._val_ax_xml(
+                self.SECONDARY_VAL_AX_ID,
+                "r",
+                "max",
+                secondary_plot.number_format,
+                False,
+            )
+        return xml
+
+    def _val_ax_id(self, plot_data):
+        return (
+            self.SECONDARY_VAL_AX_ID
+            if plot_data.axis_group == 1
+            else self.PRIMARY_VAL_AX_ID
+        )
+
+    def _val_ax_xml(self, ax_id, ax_pos, crosses, number_format, major_gridlines):
+        num_fmt_xml = (
+            f'        <c:numFmt formatCode="{number_format}" sourceLinked="0"/>\n'
+            if number_format
+            else ""
+        )
+        gridlines_xml = "        <c:majorGridlines/>\n" if major_gridlines else ""
+        return (
+            "      <c:valAx>\n"
+            '        <c:axId val="{ax_id}"/>\n'
+            "        <c:scaling/>\n"
+            '        <c:delete val="0"/>\n'
+            '        <c:axPos val="{ax_pos}"/>\n'
+            "{gridlines_xml}"
+            '        <c:majorTickMark val="out"/>\n'
+            '        <c:minorTickMark val="none"/>\n'
+            '        <c:tickLblPos val="nextTo"/>\n'
+            "{num_fmt_xml}"
+            '        <c:crossAx val="{cross_ax_id}"/>\n'
+            '        <c:crosses val="{crosses}"/>\n'
+            '        <c:crossBetween val="between"/>\n'
+            "      </c:valAx>\n"
+        ).format(
+            **{
+                "ax_id": ax_id,
+                "ax_pos": ax_pos,
+                "gridlines_xml": gridlines_xml,
+                "num_fmt_xml": num_fmt_xml,
+                "cross_ax_id": self.CAT_AX_ID,
+                "crosses": crosses,
+            }
+        )
+
+    @property
+    def _primary_val_ax_position(self):
+        first_plot = self._chart_data.plots[0]
+        if first_plot.chart_type in (
+            XL_CHART_TYPE.BAR_CLUSTERED,
+            XL_CHART_TYPE.BAR_STACKED,
+            XL_CHART_TYPE.BAR_STACKED_100,
+        ):
+            return "b"
+        return "l"
 
 
 class _PieChartXmlWriter(_BaseChartXmlWriter):
@@ -1796,6 +2121,281 @@ class _BubbleSeriesXmlRewriter(_BaseSeriesXmlRewriter):
         ser._insert_xVal(xml_writer.xVal)
         ser._insert_yVal(xml_writer.yVal)
         ser._insert_bubbleSize(xml_writer.bubbleSize)
+
+
+class _ComboCategorySeriesXmlRewriter(_BaseSeriesXmlRewriter):
+    """Update category series while preserving multi-plot structure."""
+
+    CAT_AX_ID = ComboChartXmlWriter.CAT_AX_ID
+    PRIMARY_VAL_AX_ID = ComboChartXmlWriter.PRIMARY_VAL_AX_ID
+    SECONDARY_VAL_AX_ID = ComboChartXmlWriter.SECONDARY_VAL_AX_ID
+
+    def replace_series_data(self, chartSpace):
+        plotArea, date_1904 = chartSpace.plotArea, chartSpace.date_1904
+        template_chartSpace = parse_xml(ComboChartXmlWriter(self._chart_data).xml.encode("utf-8"))
+        target_plots = self._reconcile_xCharts(plotArea, template_chartSpace)
+
+        for plot_index, (xChart, plot_data) in enumerate(target_plots):
+            self._replace_plot_series(
+                plotArea,
+                template_chartSpace.plotArea.xCharts[plot_index],
+                xChart,
+                plot_data,
+                date_1904,
+            )
+
+        for index, ser in enumerate(plotArea.sers):
+            ser.idx.val = index
+            ser.order.val = index
+
+        self._reconcile_axes(plotArea, template_chartSpace, target_plots)
+
+    def _axis_element(self, plotArea, axis_id):
+        for axis in self._axes(plotArea):
+            if axis.axId.val == axis_id:
+                return axis
+        return None
+
+    def _axes(self, plotArea):
+        return plotArea.xpath("./c:catAx|./c:dateAx|./c:valAx")
+
+    def _axis_position_matches(self, plotArea, axis_id, secondary_axis):
+        axis = self._axis_element(plotArea, axis_id)
+        if axis is None or axis.tag != qn("c:valAx"):
+            return not secondary_axis
+        ax_pos = axis.xpath("string(./c:axPos/@val)")
+        return ax_pos in ("r", "t") == secondary_axis
+
+    def _clone_ser(self, plotArea, template_xChart, xChart, series_position):
+        if xChart.sers:
+            return deepcopy(xChart.sers[-1])
+
+        tag = xChart.tag
+        for other_xChart in plotArea.xCharts:
+            if other_xChart is not xChart and other_xChart.tag == tag and other_xChart.sers:
+                return deepcopy(other_xChart.sers[-1])
+
+        ser = deepcopy(template_xChart.sers[series_position])
+        ser.getparent().remove(ser)
+        return ser
+
+    def _existing_xChart_for_plot(self, plotArea, plot_data, used_xCharts):
+        tag = self._plot_tag(plot_data.chart_type)
+        candidates = [
+            xChart
+            for xChart in plotArea.xCharts
+            if id(xChart) not in used_xCharts and xChart.tag == tag
+        ]
+        axis_group_candidates = [
+            xChart
+            for xChart in candidates
+            if len(xChart.xpath("./c:axId")) > 1
+            and self._axis_position_matches(
+                plotArea, int(xChart.xpath("./c:axId")[1].get("val")), plot_data.axis_group == 1
+            )
+        ]
+        if axis_group_candidates:
+            return axis_group_candidates[0]
+        return candidates[0] if candidates else None
+
+    def _insert_axis(self, plotArea, axis):
+        for index, child in enumerate(plotArea):
+            if child.tag not in (
+                qn("c:layout"),
+                qn("c:areaChart"),
+                qn("c:area3DChart"),
+                qn("c:barChart"),
+                qn("c:lineChart"),
+                qn("c:catAx"),
+                qn("c:dateAx"),
+                qn("c:valAx"),
+            ):
+                plotArea.insert(index, axis)
+                return
+        plotArea.append(axis)
+
+    def _plot_tag(self, chart_type):
+        bar_types = (
+            XL_CHART_TYPE.BAR_CLUSTERED,
+            XL_CHART_TYPE.BAR_STACKED,
+            XL_CHART_TYPE.BAR_STACKED_100,
+            XL_CHART_TYPE.COLUMN_CLUSTERED,
+            XL_CHART_TYPE.COLUMN_STACKED,
+            XL_CHART_TYPE.COLUMN_STACKED_100,
+        )
+        return qn("c:barChart") if chart_type in bar_types else qn("c:lineChart")
+
+    def _rewrite_ser_data(self, ser, series_data, date_1904):
+        _CategorySeriesXmlRewriter._rewrite_ser_data(
+            self, ser, series_data, date_1904
+        )
+
+    def _reconcile_axes(self, plotArea, template_chartSpace, target_plots):
+        cat_axes = plotArea.xpath("./c:catAx|./c:dateAx")
+        cat_ax_id = cat_axes[0].axId.val if cat_axes else self.CAT_AX_ID
+
+        val_ax_ids = {}
+        used_val_ax_ids = set()
+        for xChart, plot_data in target_plots:
+            val_ax_id = int(xChart.xpath("./c:axId")[1].get("val"))
+            if self._axis_element(plotArea, val_ax_id) is not None:
+                val_ax_ids.setdefault(plot_data.axis_group, val_ax_id)
+                used_val_ax_ids.add(val_ax_id)
+
+        axis_positions = {0: ("l", "b"), 1: ("r", "t")}
+        for axis_group in (0, 1):
+            needs_axis = any(p.axis_group == axis_group for _, p in target_plots)
+            if axis_group in val_ax_ids or not needs_axis:
+                continue
+            for axis in plotArea.valAx_lst:
+                if axis.axId.val in used_val_ax_ids:
+                    continue
+                ax_pos = axis.xpath("string(./c:axPos/@val)")
+                if ax_pos in axis_positions[axis_group]:
+                    val_ax_ids[axis_group] = axis.axId.val
+                    used_val_ax_ids.add(axis.axId.val)
+                    break
+            else:
+                val_ax_ids[axis_group] = (
+                    self.PRIMARY_VAL_AX_ID
+                    if axis_group == 0
+                    else self.SECONDARY_VAL_AX_ID
+                )
+
+        for xChart, plot_data in target_plots:
+            val_ax_id = val_ax_ids[plot_data.axis_group]
+            xChart.xpath("./c:axId")[0].set("val", str(cat_ax_id))
+            xChart.xpath("./c:axId")[1].set("val", str(val_ax_id))
+
+        selected_axes = {cat_ax_id}
+        selected_axes.update(val_ax_ids.values())
+        for axis in list(self._axes(plotArea)):
+            if axis.axId.val not in selected_axes:
+                axis.getparent().remove(axis)
+
+        template_axes = {
+            axis.axId.val: deepcopy(axis)
+            for axis in template_chartSpace.plotArea.xpath("./c:catAx|./c:dateAx|./c:valAx")
+        }
+
+        ordered_axes = []
+        cat_axis = self._axis_element(plotArea, cat_ax_id)
+        if cat_axis is None:
+            cat_axis = template_axes[self.CAT_AX_ID]
+            cat_axis.axId.val = cat_ax_id
+        cat_axis.crossAx.val = val_ax_ids[0]
+        ordered_axes.append(cat_axis)
+
+        for axis_group in sorted(val_ax_ids):
+            val_ax_id = val_ax_ids[axis_group]
+            val_axis = self._axis_element(plotArea, val_ax_id)
+            if val_axis is None:
+                template_id = (
+                    self.PRIMARY_VAL_AX_ID
+                    if axis_group == 0
+                    else self.SECONDARY_VAL_AX_ID
+                )
+                val_axis = template_axes[template_id]
+                val_axis.axId.val = val_ax_id
+            val_axis.crossAx.val = cat_ax_id
+            ordered_axes.append(val_axis)
+
+        for axis in ordered_axes:
+            parent = axis.getparent()
+            if parent is not None:
+                parent.remove(axis)
+
+        for axis in ordered_axes:
+            self._insert_axis(plotArea, axis)
+
+    def _reconcile_xCharts(self, plotArea, template_chartSpace):
+        target_plots = []
+        used_xCharts = set()
+
+        for plot_index, plot_data in enumerate(self._chart_data.plots):
+            xChart = self._existing_xChart_for_plot(plotArea, plot_data, used_xCharts)
+            if xChart is None:
+                xChart = deepcopy(template_chartSpace.xCharts[plot_index])
+                plotArea.insert(1 + plot_index, xChart)
+            used_xCharts.add(id(xChart))
+            target_plots.append((xChart, plot_data))
+
+        target_elements = {id(xChart) for xChart, _ in target_plots}
+        for xChart in list(plotArea.xCharts):
+            if id(xChart) not in target_elements:
+                plotArea.remove(xChart)
+
+        for index, (xChart, _) in enumerate(target_plots):
+            plotArea.remove(xChart)
+            plotArea.insert(1 + index, xChart)
+
+        return target_plots
+
+    def _replace_plot_series(
+        self, plotArea, template_xChart, xChart, plot_data, date_1904
+    ):
+        existing_sers = list(xChart.sers)
+        used_sers = set()
+        matched_sers = []
+
+        def match_series(series_data, same_name_only):
+            for ser in existing_sers:
+                if id(ser) in used_sers:
+                    continue
+                if same_name_only:
+                    name = ser.xpath("string(./c:tx//c:f)")
+                    if name and name != series_data.name_ref:
+                        continue
+                used_sers.add(id(ser))
+                return ser
+            return None
+
+        for series_data in plot_data.series:
+            matched_sers.append(match_series(series_data, True))
+
+        for index, ser in enumerate(existing_sers):
+            if (
+                index < len(matched_sers)
+                and id(ser) not in used_sers
+                and matched_sers[index] is None
+            ):
+                matched_sers[index] = ser
+                used_sers.add(id(ser))
+
+        for index in range(len(plot_data.series)):
+            if matched_sers[index] is None:
+                ser = self._clone_ser(plotArea, template_xChart, xChart, index)
+                matched_sers[index] = ser
+
+        for ser in existing_sers:
+            if id(ser) not in used_sers:
+                ser.getparent().remove(ser)
+
+        successors = (
+            qn("c:dLbls"),
+            qn("c:dropLines"),
+            qn("c:gapWidth"),
+            qn("c:hiLowLines"),
+            qn("c:marker"),
+            qn("c:overlap"),
+            qn("c:serLines"),
+            qn("c:smooth"),
+            qn("c:upDownBars"),
+            qn("c:axId"),
+            qn("c:extLst"),
+        )
+        insertion_index = next(
+            (index for index, child in enumerate(xChart) if child.tag in successors),
+            len(xChart),
+        )
+        for ser in matched_sers:
+            if ser.getparent() is xChart:
+                xChart.remove(ser)
+        for index, ser in enumerate(matched_sers):
+            xChart.insert(insertion_index + index, ser)
+
+        for ser, series_data in zip(matched_sers, plot_data.series):
+            self._rewrite_ser_data(ser, series_data, date_1904)
 
 
 class _CategorySeriesXmlRewriter(_BaseSeriesXmlRewriter):

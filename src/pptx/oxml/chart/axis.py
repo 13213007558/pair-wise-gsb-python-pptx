@@ -88,8 +88,10 @@ class CT_CatAx(BaseAxisElement):
         "c:noMultiLvlLbl",
         "c:extLst",
     )
+    axId = OneAndOnlyOne("c:axId")
     scaling = OneAndOnlyOne("c:scaling")
     delete_ = ZeroOrOne("c:delete", successors=_tag_seq[3:])
+    axPos = OneAndOnlyOne("c:axPos")
     majorGridlines = ZeroOrOne("c:majorGridlines", successors=_tag_seq[5:])
     minorGridlines = ZeroOrOne("c:minorGridlines", successors=_tag_seq[6:])
     title = ZeroOrOne("c:title", successors=_tag_seq[7:])
@@ -99,6 +101,7 @@ class CT_CatAx(BaseAxisElement):
     tickLblPos = ZeroOrOne("c:tickLblPos", successors=_tag_seq[11:])
     spPr = ZeroOrOne("c:spPr", successors=_tag_seq[12:])
     txPr = ZeroOrOne("c:txPr", successors=_tag_seq[13:])
+    crossAx = OneAndOnlyOne("c:crossAx")
     crosses = ZeroOrOne("c:crosses", successors=_tag_seq[15:])
     crossesAt = ZeroOrOne("c:crossesAt", successors=_tag_seq[16:])
     lblOffset = ZeroOrOne("c:lblOffset", successors=_tag_seq[19:])
@@ -149,8 +152,10 @@ class CT_DateAx(BaseAxisElement):
         "c:minorTimeUnit",
         "c:extLst",
     )
+    axId = OneAndOnlyOne("c:axId")
     scaling = OneAndOnlyOne("c:scaling")
     delete_ = ZeroOrOne("c:delete", successors=_tag_seq[3:])
+    axPos = OneAndOnlyOne("c:axPos")
     majorGridlines = ZeroOrOne("c:majorGridlines", successors=_tag_seq[5:])
     minorGridlines = ZeroOrOne("c:minorGridlines", successors=_tag_seq[6:])
     title = ZeroOrOne("c:title", successors=_tag_seq[7:])
@@ -160,6 +165,7 @@ class CT_DateAx(BaseAxisElement):
     tickLblPos = ZeroOrOne("c:tickLblPos", successors=_tag_seq[11:])
     spPr = ZeroOrOne("c:spPr", successors=_tag_seq[12:])
     txPr = ZeroOrOne("c:txPr", successors=_tag_seq[13:])
+    crossAx = OneAndOnlyOne("c:crossAx")
     crosses = ZeroOrOne("c:crosses", successors=_tag_seq[15:])
     crossesAt = ZeroOrOne("c:crossesAt", successors=_tag_seq[16:])
     lblOffset = ZeroOrOne("c:lblOffset", successors=_tag_seq[18:])
@@ -278,8 +284,10 @@ class CT_ValAx(BaseAxisElement):
         "c:dispUnits",
         "c:extLst",
     )
+    axId = OneAndOnlyOne("c:axId")
     scaling = OneAndOnlyOne("c:scaling")
     delete_ = ZeroOrOne("c:delete", successors=_tag_seq[3:])
+    axPos = OneAndOnlyOne("c:axPos")
     majorGridlines = ZeroOrOne("c:majorGridlines", successors=_tag_seq[5:])
     minorGridlines = ZeroOrOne("c:minorGridlines", successors=_tag_seq[6:])
     title = ZeroOrOne("c:title", successors=_tag_seq[7:])

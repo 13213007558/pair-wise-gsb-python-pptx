@@ -69,6 +69,34 @@ object. That's because a chart is not itself a shape. Rather it's a graphical
 way too, also being contained in a graphic frame shape.
 
 
+Combo charts
+------------
+
+Use |ComboChartData| when series in the same category chart must use multiple
+plots, such as column sales with a line gross-margin rate on a secondary
+percentage axis. Categories are shared and each plot uses either the primary
+or an independent secondary value axis::
+
+    from pptx.chart.data import ComboChartData
+
+    chart_data = ComboChartData()
+    chart_data.categories = ['Q1', 'Q2', 'Q3']
+
+    sales_plot = chart_data.add_plot(XL_CHART_TYPE.COLUMN_CLUSTERED)
+    sales_plot.add_series('Sales', (19.2, 21.4, 16.7))
+
+    margin_plot = chart_data.add_plot(
+        XL_CHART_TYPE.LINE, secondary_axis=True, number_format="0%"
+    )
+    margin_plot.add_series('Gross margin', (0.21, 0.24, 0.22))
+
+The same |ComboChartData| shape can be passed to
+:meth:`Chart.replace_data` to update values without recreating existing plots,
+axes, series styles, or plot-level data labels. Include a plot with no series
+to retain an empty plot and its axis when a series is removed. Two line plots
+can likewise be assigned to the left and right axes.
+
+
 XY and Bubble charts
 --------------------
 
@@ -177,9 +205,9 @@ A plot is like a sub-chart, containing one or more series and drawn as
 a particular chart type, like column or line. This distinction is needed for
 charts that combine more than one type, like a line chart appearing on top of
 a column chart. A chart like this would have two plot objects, one for the
-series appearing as columns and the other for the lines. Most charts only
-have a single plot and |pp| doesn't yet support creating multi-plot charts,
-but you can access multiple plots on a chart that already has them.
+series appearing as columns and the other for the lines. Combo charts can be
+created from |ComboChartData|, and multiple plots are also available on an
+existing chart.
 
 In the Microsoft API, the name *ChartGroup* is used for this object. I found
 that term confusing for a long time while I was learning about MS Office
