@@ -11,7 +11,7 @@ from pptx.chart.xlsx import (
     CategoryWorkbookWriter,
     XyWorkbookWriter,
 )
-from pptx.chart.xmlwriter import ChartXmlWriter
+from pptx.chart.xmlwriter import ChartXmlWriter, ComboChartXmlWriter
 from pptx.util import lazyproperty
 
 
@@ -337,6 +337,120 @@ class CategoryChartData(_BaseChartData):
         worksheet for this chart will be delegated.
         """
         return CategoryWorkbookWriter(self)
+
+
+class ComboChartData(CategoryChartData):
+    """Accumulates data for a combo (multi-plot) chart.
+
+    A combo chart depicts its series in two or more *plots*, for example
+    a column plot of sales values overlaid with a line plot of gross-margin
+    percentages. Each plot is added with :meth:`add_plot`, which specifies
+    the chart type for that plot and whether it is plotted against the
+    secondary (right-hand) value axis. Series are then added to each plot
+    using :meth:`ComboPlotData.add_series`.
+
+    All plots share a single category axis. Plots not marked as secondary
+    share the primary value axis; plots marked with *secondary_axis* share
+    an independent secondary value axis. This object is used as a parameter
+    in :meth:`shapes.add_chart` and :meth:`Chart.replace_data`, in the
+    same way as |CategoryChartData|.
+    """
+
+    is_combo = True
+
+    def __init__(self, number_format="General"):
+        super(ComboChartData, self).__init__(number_format)
+        self._plots = []
+
+    def add_plot(self, chart_type, secondary_axis=False):
+        """Return a new |ComboPlotData| object appended to this chart data.
+
+        *chart_type* is a member of the :ref:`XlChartType` enumeration
+        specifying the charting type for series in this plot, such as
+        ``COLUMN_CLUSTERED`` or ``LINE``. Assigning *secondary_axis*
+        a true value causes series in this plot to be plotted against the
+        secondary value axis (displayed on the right for a column or line
+        plot); otherwise the primary value axis is used.
+        """
+        plot_data = ComboPlotData(self, chart_type, secondary_axis)
+        self._plots.append(plot_data)
+        return plot_data
+
+    def add_series(self, name, values=(), number_format=None):
+        """Not available on combo chart data; raises |ValueError|.
+
+        Series must be added to a specific plot using
+        :meth:`ComboPlotData.add_series` on a plot object returned by
+        :meth:`add_plot`.
+        """
+        raise ValueError(
+            "use add_plot() to add a plot, then plot.add_series() to add"
+            " series to a ComboChartData object"
+        )
+
+    @property
+    def plots(self):
+        """Tuple of |ComboPlotData| objects for this chart, in plot order.
+
+        Plots are sequenced in the order they are drawn, i.e. back-most to
+        front-most, which is the order in which they were added.
+        """
+        return tuple(self._plots)
+
+    def _xml(self, chart_type):
+        """
+        Return (as unicode text) the XML for a combo chart populated with
+        the values in this chart data object. *chart_type* is ignored; the
+        charting type of each plot is specified by its |ComboPlotData|
+        object.
+        """
+        return ComboChartXmlWriter(self).xml
+
+
+class ComboPlotData(Sequence):
+    """Accumulates the series belonging to a single plot of a combo chart.
+
+    A plot corresponds to a *chart group* in the Microsoft API, a distinct
+    sequence of one or more series depicted in a particular charting type.
+    """
+
+    def __init__(self, chart_data, chart_type, secondary_axis=False):
+        super(ComboPlotData, self).__init__()
+        self._chart_data = chart_data
+        self._chart_type = chart_type
+        self._secondary_axis = bool(secondary_axis)
+        self._series = []
+
+    def __getitem__(self, index):
+        return self._series.__getitem__(index)
+
+    def __len__(self):
+        return self._series.__len__()
+
+    def add_series(self, name, values=(), number_format=None):
+        """
+        Add a series to this plot entitled *name* and having the data
+        points specified by *values*, an iterable of numeric values.
+        *number_format* specifies how the series values will be displayed,
+        e.g. '0.0%' for a percentage axis; if not specified, the number
+        format of the chart data object is inherited.
+        """
+        series_data = CategorySeriesData(self._chart_data, name, number_format)
+        self._chart_data.append(series_data)
+        self._series.append(series_data)
+        for value in values:
+            series_data.add_data_point(value)
+        return series_data
+
+    @property
+    def chart_type(self):
+        """Member of :ref:`XlChartType` specifying charting type of this plot."""
+        return self._chart_type
+
+    @property
+    def secondary_axis(self):
+        """|True| if this plot is plotted against the secondary value axis."""
+        return self._secondary_axis
 
 
 class Categories(Sequence):

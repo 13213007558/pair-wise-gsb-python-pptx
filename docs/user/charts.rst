@@ -122,6 +122,42 @@ Creation of a bubble chart is very similar, having an additional value for each 
 
 
 
+Combo charts
+------------
+
+A *combo* chart depicts its series in two or more *plots*, each having its
+own charting type, for example a column plot of sales values overlaid with
+a line plot of gross-margin percentages. A |ComboChartData| object is used
+to specify the data behind a combo chart. Each plot is added with
+:meth:`.ComboChartData.add_plot`, which specifies the chart type for that
+plot and whether it is plotted against the secondary (right-hand) value
+axis; series are then added to each plot. All plots share a single
+category axis::
+
+    from pptx.chart.data import ComboChartData
+
+    chart_data = ComboChartData()
+    chart_data.categories = ['Q1', 'Q2', 'Q3', 'Q4']
+
+    sales_plot = chart_data.add_plot(XL_CHART_TYPE.COLUMN_CLUSTERED)
+    sales_plot.add_series('Sales', (100, 200, 300, 400))
+
+    margin_plot = chart_data.add_plot(XL_CHART_TYPE.LINE, secondary_axis=True)
+    margin_plot.add_series('Margin', (0.12, 0.15, 0.11, 0.18),
+                           number_format='0.0%')
+
+    chart = slide.shapes.add_chart(
+        XL_CHART_TYPE.COLUMN_CLUSTERED, x, y, cx, cy, chart_data
+    ).chart
+
+The chart type passed to :meth:`.SlideShapes.add_chart` is ignored for
+a combo chart; the charting type of each plot is determined by its
+|ComboPlotData| object. A |ComboChartData| object can also be passed to
+:meth:`.Chart.replace_data`, in which case series are replaced
+plot-by-plot, leaving the axes, formatting, and data labels of every plot
+intact.
+
+
 Axes
 ----
 

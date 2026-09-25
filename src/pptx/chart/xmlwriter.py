@@ -59,6 +59,9 @@ def SeriesXmlRewriterFactory(chart_type, chart_data):
     """
     XL_CT = XL_CHART_TYPE
 
+    if getattr(chart_data, "is_combo", False):
+        return _ComboSeriesXmlRewriter(chart_data)
+
     RewriterCls = {
         # There are 73 distinct chart types, only specify non-category
         # types, others default to _CategorySeriesXmlRewriter. Stock-type
@@ -74,6 +77,15 @@ def SeriesXmlRewriterFactory(chart_type, chart_data):
     }.get(chart_type, _CategorySeriesXmlRewriter)
 
     return RewriterCls(chart_data)
+
+
+def ComboChartXmlWriter(chart_data):
+    """
+    Return a |_ComboChartXmlWriter| instance loaded with *chart_data*,
+    a |ComboChartData| object specifying the plots, axes, and series of
+    a combo (multi-plot) chart.
+    """
+    return _ComboChartXmlWriter(chart_data)
 
 
 class _BaseChartXmlWriter(object):
@@ -893,6 +905,421 @@ class _LineChartXmlWriter(_BaseChartXmlWriter):
                 }
             )
         return xml
+
+
+class _ComboChartXmlWriter(_BaseChartXmlWriter):
+    """
+    Generates XML for a combo (multi-plot) chart, such as a clustered-column
+    plot overlaid with a line plot drawn against a secondary value axis.
+
+    All plots share a single category (or date) axis. Plots not marked as
+    secondary share the primary value axis; plots marked as secondary share
+    a distinct secondary value axis displayed on the opposite side of the
+    plot area.
+    """
+
+    # ---axis ids are arbitrary integers, but must be distinct within a chart
+    #   and consistent between the c:axId references of each plot, the axis
+    #   elements themselves, and their c:crossAx references---
+    _cat_ax_id = 164285424
+    _prim_val_ax_id = 164286912
+    _sec_val_ax_id = 164288400
+
+    _BAR_TYPES = (
+        XL_CHART_TYPE.BAR_CLUSTERED,
+        XL_CHART_TYPE.BAR_STACKED,
+        XL_CHART_TYPE.BAR_STACKED_100,
+        XL_CHART_TYPE.COLUMN_CLUSTERED,
+        XL_CHART_TYPE.COLUMN_STACKED,
+        XL_CHART_TYPE.COLUMN_STACKED_100,
+    )
+    _LINE_TYPES = (
+        XL_CHART_TYPE.LINE,
+        XL_CHART_TYPE.LINE_MARKERS,
+        XL_CHART_TYPE.LINE_STACKED,
+        XL_CHART_TYPE.LINE_MARKERS_STACKED,
+        XL_CHART_TYPE.LINE_STACKED_100,
+        XL_CHART_TYPE.LINE_MARKERS_STACKED_100,
+    )
+
+    def __init__(self, chart_data):
+        super(_ComboChartXmlWriter, self).__init__(None, chart_data)
+
+    @property
+    def xml(self):
+        self._validate()
+        return (
+            "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>\n"
+            '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawin'
+            'gml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/draw'
+            'ingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/off'
+            'iceDocument/2006/relationships">\n'
+            '  <c:date1904 val="0"/>\n'
+            '  <c:roundedCorners val="0"/>\n'
+            "  <c:chart>\n"
+            '    <c:autoTitleDeleted val="0"/>\n'
+            "    <c:plotArea>\n"
+            "      <c:layout/>\n"
+            "{plot_xml}"
+            "{cat_ax_xml}"
+            "{prim_val_ax_xml}"
+            "{sec_val_ax_xml}"
+            "    </c:plotArea>\n"
+            "    <c:legend>\n"
+            '      <c:legendPos val="r"/>\n'
+            "      <c:layout/>\n"
+            '      <c:overlay val="0"/>\n'
+            "    </c:legend>\n"
+            '    <c:plotVisOnly val="1"/>\n'
+            '    <c:dispBlanksAs val="gap"/>\n'
+            '    <c:showDLblsOverMax val="0"/>\n'
+            "  </c:chart>\n"
+            "  <c:txPr>\n"
+            "    <a:bodyPr/>\n"
+            "    <a:lstStyle/>\n"
+            "    <a:p>\n"
+            "      <a:pPr>\n"
+            '        <a:defRPr sz="1800"/>\n'
+            "      </a:pPr>\n"
+            "      <a:endParaRPr/>\n"
+            "    </a:p>\n"
+            "  </c:txPr>\n"
+            "</c:chartSpace>\n"
+        ).format(
+            **{
+                "plot_xml": self._plot_xml,
+                "cat_ax_xml": self._cat_ax_xml,
+                "prim_val_ax_xml": self._val_ax_xml(
+                    self._prim_val_ax_id,
+                    self._prim_val_ax_pos,
+                    self._axis_number_format(secondary=False),
+                    crosses="autoZero",
+                    gridlines=True,
+                ),
+                "sec_val_ax_xml": (
+                    self._val_ax_xml(
+                        self._sec_val_ax_id,
+                        self._sec_val_ax_pos,
+                        self._axis_number_format(secondary=True),
+                        crosses="max",
+                        gridlines=False,
+                    )
+                    if self._has_secondary_plot
+                    else ""
+                ),
+            }
+        )
+
+    def _validate(self):
+        """
+        Raise if this chart data cannot be rendered as a combo chart.
+        """
+        plots = self._chart_data.plots
+        if not plots:
+            raise ValueError("combo chart data contains no plots")
+        for plot_data in plots:
+            if plot_data.chart_type not in self._BAR_TYPES + self._LINE_TYPES:
+                raise NotImplementedError(
+                    "combo plot of chart type %s not yet implemented" % plot_data.chart_type
+                )
+            if len(plot_data) == 0:
+                raise ValueError("combo plot contains no series")
+
+    @property
+    def _cat_ax_xml(self):
+        categories = self._chart_data.categories
+
+        if categories.are_dates:
+            return (
+                "      <c:dateAx>\n"
+                '        <c:axId val="{cat_ax_id}"/>\n'
+                "        <c:scaling>\n"
+                '          <c:orientation val="minMax"/>\n'
+                "        </c:scaling>\n"
+                '        <c:delete val="0"/>\n'
+                '        <c:axPos val="{cat_ax_pos}"/>\n'
+                '        <c:numFmt formatCode="{nf}" sourceLinked="1"/>\n'
+                '        <c:majorTickMark val="out"/>\n'
+                '        <c:minorTickMark val="none"/>\n'
+                '        <c:tickLblPos val="nextTo"/>\n'
+                '        <c:crossAx val="{prim_val_ax_id}"/>\n'
+                '        <c:crosses val="autoZero"/>\n'
+                '        <c:auto val="1"/>\n'
+                '        <c:lblOffset val="100"/>\n'
+                '        <c:baseTimeUnit val="days"/>\n'
+                "      </c:dateAx>\n"
+            ).format(
+                **{
+                    "cat_ax_id": self._cat_ax_id,
+                    "cat_ax_pos": self._cat_ax_pos,
+                    "nf": categories.number_format,
+                    "prim_val_ax_id": self._prim_val_ax_id,
+                }
+            )
+
+        return (
+            "      <c:catAx>\n"
+            '        <c:axId val="{cat_ax_id}"/>\n'
+            "        <c:scaling>\n"
+            '          <c:orientation val="minMax"/>\n'
+            "        </c:scaling>\n"
+            '        <c:delete val="0"/>\n'
+            '        <c:axPos val="{cat_ax_pos}"/>\n'
+            '        <c:majorTickMark val="out"/>\n'
+            '        <c:minorTickMark val="none"/>\n'
+            '        <c:tickLblPos val="nextTo"/>\n'
+            '        <c:crossAx val="{prim_val_ax_id}"/>\n'
+            '        <c:crosses val="autoZero"/>\n'
+            '        <c:auto val="1"/>\n'
+            '        <c:lblAlgn val="ctr"/>\n'
+            '        <c:lblOffset val="100"/>\n'
+            '        <c:noMultiLvlLbl val="0"/>\n'
+            "      </c:catAx>\n"
+        ).format(
+            **{
+                "cat_ax_id": self._cat_ax_id,
+                "cat_ax_pos": self._cat_ax_pos,
+                "prim_val_ax_id": self._prim_val_ax_id,
+            }
+        )
+
+    @property
+    def _cat_ax_pos(self):
+        return "l" if self._is_horizontal_bar else "b"
+
+    @property
+    def _prim_val_ax_pos(self):
+        return "b" if self._is_horizontal_bar else "l"
+
+    @property
+    def _sec_val_ax_pos(self):
+        return "t" if self._is_horizontal_bar else "r"
+
+    @property
+    def _is_horizontal_bar(self):
+        """
+        True if the first (back-most) plot is a horizontal bar plot, in
+        which case the category axis is vertical and the value axes are
+        horizontal.
+        """
+        bar_types = (
+            XL_CHART_TYPE.BAR_CLUSTERED,
+            XL_CHART_TYPE.BAR_STACKED,
+            XL_CHART_TYPE.BAR_STACKED_100,
+        )
+        return self._chart_data.plots[0].chart_type in bar_types
+
+    @property
+    def _has_secondary_plot(self):
+        return any(plot_data.secondary_axis for plot_data in self._chart_data.plots)
+
+    def _axis_number_format(self, secondary):
+        """
+        The number format of the first series of the first plot drawn
+        against the value axis indicated by *secondary*, or |None| if no
+        plot uses that axis.
+        """
+        for plot_data in self._chart_data.plots:
+            if plot_data.secondary_axis != secondary:
+                continue
+            for series in plot_data:
+                return series.number_format
+        return None
+
+    @property
+    def _plot_xml(self):
+        xml = ""
+        for plot_data in self._chart_data.plots:
+            if plot_data.chart_type in self._BAR_TYPES:
+                xml += self._barChart_xml(plot_data)
+            else:
+                xml += self._lineChart_xml(plot_data)
+        return xml
+
+    def _barChart_xml(self, plot_data):
+        return (
+            "      <c:barChart>\n"
+            '        <c:barDir val="{barDir}"/>\n'
+            '        <c:grouping val="{grouping}"/>\n'
+            '        <c:varyColors val="0"/>\n'
+            "{ser_xml}"
+            "{overlap_xml}"
+            '        <c:axId val="{cat_ax_id}"/>\n'
+            '        <c:axId val="{val_ax_id}"/>\n'
+            "      </c:barChart>\n"
+        ).format(
+            **{
+                "barDir": self._barDir_val(plot_data.chart_type),
+                "grouping": self._bar_grouping_val(plot_data.chart_type),
+                "ser_xml": self._ser_xml(plot_data),
+                "overlap_xml": self._overlap_xml(plot_data.chart_type),
+                "cat_ax_id": self._cat_ax_id,
+                "val_ax_id": self._val_ax_id(plot_data),
+            }
+        )
+
+    def _lineChart_xml(self, plot_data):
+        return (
+            "      <c:lineChart>\n"
+            '        <c:grouping val="{grouping}"/>\n'
+            '        <c:varyColors val="0"/>\n'
+            "{ser_xml}"
+            '        <c:marker val="1"/>\n'
+            '        <c:smooth val="0"/>\n'
+            '        <c:axId val="{cat_ax_id}"/>\n'
+            '        <c:axId val="{val_ax_id}"/>\n'
+            "      </c:lineChart>\n"
+        ).format(
+            **{
+                "grouping": self._line_grouping_val(plot_data.chart_type),
+                "ser_xml": self._ser_xml(plot_data),
+                "cat_ax_id": self._cat_ax_id,
+                "val_ax_id": self._val_ax_id(plot_data),
+            }
+        )
+
+    def _ser_xml(self, plot_data):
+        """
+        The sequence of c:ser elements for *plot_data*, as unicode text.
+        Series idx and order values are unique across the whole chart (not
+        just within the plot) so they stay consistent with the columns of
+        the embedded worksheet.
+        """
+        is_line = plot_data.chart_type in self._LINE_TYPES
+        xml = ""
+        for series in plot_data:
+            xml_writer = _CategorySeriesXmlWriter(series)
+            if is_line:
+                xml += (
+                    "        <c:ser>\n"
+                    '          <c:idx val="{ser_idx}"/>\n'
+                    '          <c:order val="{ser_order}"/>\n'
+                    "{tx_xml}"
+                    "{marker_xml}"
+                    "{cat_xml}"
+                    "{val_xml}"
+                    '          <c:smooth val="0"/>\n'
+                    "        </c:ser>\n"
+                ).format(
+                    **{
+                        "ser_idx": series.index,
+                        "ser_order": series.index,
+                        "tx_xml": xml_writer.tx_xml,
+                        "marker_xml": self._marker_xml(plot_data.chart_type),
+                        "cat_xml": xml_writer.cat_xml,
+                        "val_xml": xml_writer.val_xml,
+                    }
+                )
+            else:
+                xml += (
+                    "        <c:ser>\n"
+                    '          <c:idx val="{ser_idx}"/>\n'
+                    '          <c:order val="{ser_order}"/>\n'
+                    "{tx_xml}"
+                    "{cat_xml}"
+                    "{val_xml}"
+                    "        </c:ser>\n"
+                ).format(
+                    **{
+                        "ser_idx": series.index,
+                        "ser_order": series.index,
+                        "tx_xml": xml_writer.tx_xml,
+                        "cat_xml": xml_writer.cat_xml,
+                        "val_xml": xml_writer.val_xml,
+                    }
+                )
+        return xml
+
+    def _val_ax_xml(self, ax_id, ax_pos, number_format, crosses, gridlines):
+        numFmt_xml = ""
+        if number_format not in (None, "General"):
+            numFmt_xml = '        <c:numFmt formatCode="%s" sourceLinked="0"/>\n' % escape(
+                number_format
+            )
+        gridlines_xml = "        <c:majorGridlines/>\n" if gridlines else ""
+        return (
+            "      <c:valAx>\n"
+            '        <c:axId val="{ax_id}"/>\n'
+            "        <c:scaling>\n"
+            '          <c:orientation val="minMax"/>\n'
+            "        </c:scaling>\n"
+            '        <c:delete val="0"/>\n'
+            '        <c:axPos val="{ax_pos}"/>\n'
+            "{gridlines_xml}"
+            "{numFmt_xml}"
+            '        <c:majorTickMark val="out"/>\n'
+            '        <c:minorTickMark val="none"/>\n'
+            '        <c:tickLblPos val="nextTo"/>\n'
+            '        <c:crossAx val="{cat_ax_id}"/>\n'
+            '        <c:crosses val="{crosses}"/>\n'
+            "      </c:valAx>\n"
+        ).format(
+            **{
+                "ax_id": ax_id,
+                "ax_pos": ax_pos,
+                "gridlines_xml": gridlines_xml,
+                "numFmt_xml": numFmt_xml,
+                "cat_ax_id": self._cat_ax_id,
+                "crosses": crosses,
+            }
+        )
+
+    def _val_ax_id(self, plot_data):
+        return self._sec_val_ax_id if plot_data.secondary_axis else self._prim_val_ax_id
+
+    @staticmethod
+    def _barDir_val(chart_type):
+        bar_types = (
+            XL_CHART_TYPE.BAR_CLUSTERED,
+            XL_CHART_TYPE.BAR_STACKED,
+            XL_CHART_TYPE.BAR_STACKED_100,
+        )
+        return "bar" if chart_type in bar_types else "col"
+
+    @staticmethod
+    def _bar_grouping_val(chart_type):
+        XL = XL_CHART_TYPE
+        if chart_type in (XL.BAR_STACKED, XL.COLUMN_STACKED):
+            return "stacked"
+        if chart_type in (XL.BAR_STACKED_100, XL.COLUMN_STACKED_100):
+            return "percentStacked"
+        return "clustered"
+
+    @staticmethod
+    def _line_grouping_val(chart_type):
+        XL = XL_CHART_TYPE
+        if chart_type in (XL.LINE_STACKED, XL.LINE_MARKERS_STACKED):
+            return "stacked"
+        if chart_type in (XL.LINE_STACKED_100, XL.LINE_MARKERS_STACKED_100):
+            return "percentStacked"
+        return "standard"
+
+    @staticmethod
+    def _marker_xml(chart_type):
+        no_marker_types = (
+            XL_CHART_TYPE.LINE,
+            XL_CHART_TYPE.LINE_STACKED,
+            XL_CHART_TYPE.LINE_STACKED_100,
+        )
+        if chart_type in no_marker_types:
+            return (
+                "          <c:marker>\n"
+                '            <c:symbol val="none"/>\n'
+                "          </c:marker>\n"
+            )
+        return ""
+
+    @staticmethod
+    def _overlap_xml(chart_type):
+        stacked_types = (
+            XL_CHART_TYPE.BAR_STACKED,
+            XL_CHART_TYPE.BAR_STACKED_100,
+            XL_CHART_TYPE.COLUMN_STACKED,
+            XL_CHART_TYPE.COLUMN_STACKED_100,
+        )
+        if chart_type in stacked_types:
+            return '        <c:overlap val="100"/>\n'
+        return ""
 
 
 class _PieChartXmlWriter(_BaseChartXmlWriter):
@@ -1817,6 +2244,70 @@ class _CategorySeriesXmlRewriter(_BaseSeriesXmlRewriter):
         ser._insert_tx(xml_writer.tx)
         ser._insert_cat(xml_writer.cat)
         ser._insert_val(xml_writer.val)
+
+
+class _ComboSeriesXmlRewriter(_CategorySeriesXmlRewriter):
+    """
+    A series rewriter suitable for combo (multi-plot) charts.
+
+    Series are rewritten plot-by-plot so each `c:ser` element remains in
+    its original plot (xChart) element. Plot-level formatting, axes, axis
+    ids, and data labels of all plots are left undisturbed; only the
+    `c:tx`, `c:cat`, and `c:val` children of each series are rewritten.
+    """
+
+    def replace_series_data(self, chartSpace):
+        """
+        Rewrite the series data under *chartSpace* plot-by-plot using the
+        contents of this combo chart data. The number of plots in the chart
+        data must not exceed the number of plots in the chart. Plots
+        present in the chart but not in the chart data are removed, along
+        with their series; their axis elements are left in place.
+        """
+        plotArea, date_1904 = chartSpace.plotArea, chartSpace.date_1904
+        chart_data = self._chart_data
+        plots = chart_data.plots
+        xCharts = list(plotArea.iter_xCharts())
+
+        if len(plots) > len(xCharts):
+            raise ValueError(
+                "cannot add plots when replacing chart data; chart has %d"
+                " plot(s) but chart data has %d" % (len(xCharts), len(plots))
+            )
+
+        for xChart, plot_data in zip(xCharts, plots):
+            self._adjust_xChart_ser_count(plotArea, xChart, len(plot_data))
+            for ser, series_data in zip(xChart.sers, plot_data):
+                self._rewrite_ser_data(ser, series_data, date_1904)
+
+        for xChart in xCharts[len(plots) :]:
+            plotArea.remove(xChart)
+
+    @staticmethod
+    def _adjust_xChart_ser_count(plotArea, xChart, new_ser_count):
+        """
+        Adjust the number of `c:ser` elements in *xChart* to
+        *new_ser_count*. New series are cloned from the last series of
+        *xChart* so plot-level formatting is preserved; excess series are
+        removed from the end. If *xChart* is left with no series, it is
+        removed from *plotArea*.
+        """
+        ser_count_diff = new_ser_count - len(xChart.sers)
+
+        if ser_count_diff > 0:
+            last_ser = xChart.sers[-1]
+            for _ in range(ser_count_diff):
+                new_ser = deepcopy(last_ser)
+                new_ser.idx.val = plotArea.next_idx
+                new_ser.order.val = plotArea.next_order
+                last_ser.addnext(new_ser)
+                last_ser = new_ser
+        elif ser_count_diff < 0:
+            for ser in xChart.sers[ser_count_diff:]:
+                xChart.remove(ser)
+
+        if len(xChart.sers) == 0:
+            plotArea.remove(xChart)
 
 
 class _XySeriesXmlRewriter(_BaseSeriesXmlRewriter):

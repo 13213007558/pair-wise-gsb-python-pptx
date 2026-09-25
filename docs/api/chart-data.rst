@@ -46,6 +46,20 @@ require a distinct chart data object.
        count, data_point_offset, index, series_index, series_name_ref,
        x_values_ref, xlsx_blob, xml_bytes, y_values_ref
 
+.. autoclass:: pptx.chart.data.ComboChartData
+   :members:
+   :member-order: bysource
+   :inherited-members:
+   :exclude-members:
+       append, categories_ref, count, data_point_offset, index, series_index,
+       series_name_ref, x_values_ref, xlsx_blob, xml_bytes, y_values_ref
+   :undoc-members:
+
+.. autoclass:: pptx.chart.data.ComboPlotData
+   :members:
+   :member-order: bysource
+   :undoc-members:
+
 .. autoclass:: pptx.chart.data.BubbleChartData
    :members:
    :member-order: bysource
@@ -67,4 +81,3 @@ require a distinct chart data object.
    :inherited-members:
    :exclude-members:
        count, bubble_sizes_ref, name_ref, x_values_ref, y_values_ref
-
