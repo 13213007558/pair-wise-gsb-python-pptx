@@ -3,6 +3,19 @@
 Release History
 ---------------
 
+Next release
++++++++++++
+
+- Add `SlideShapes.reparent()` and `GroupShapes.reparent()` to move a shape
+  between shape trees while preserving its on-slide geometry, compensating
+  for group `chOff`/`chExt` scaling, rotation, and flips. Transforms
+  requiring shear raise `pptx.exc.UnrepresentableTransformError` rather
+  than being approximated.
+- Add `SlideShapes.ungroup()` and `GroupShape.ungroup()` to dissolve a group
+  while preserving member geometry; `add_group_shape()` now preserves the
+  page geometry of grouped shapes and no longer disturbs remaining members
+  of any source group.
+
 1.0.2 (2024-08-07)
 ++++++++++++++++++
 

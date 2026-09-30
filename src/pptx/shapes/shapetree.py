@@ -32,6 +32,7 @@ from pptx.shapes.placeholder import (
     SlidePlaceholder,
     TablePlaceholder,
 )
+from pptx.shapes.reparent import apply_xfrm_values, new_xfrm_values, reparent_element
 from pptx.shared import ParentedElementProxy
 from pptx.util import Emu, lazyproperty
 
@@ -278,19 +279,32 @@ class _BaseGroupShapes(_BaseShapes):
     def add_group_shape(self, shapes: Iterable[BaseShape] = ()) -> GroupShape:
         """Return a |GroupShape| object newly appended to this shape tree.
 
-        The group shape is empty and must be populated with shapes using methods on its shape
-        tree, available on its `.shapes` property. The position and extents of the group shape are
-        determined by the shapes it contains; its position and extents are recalculated each time
-        a shape is added to it.
+        When `shapes` is provided, those shapes are moved into the new group. They may
+        come from this shape tree or from a group on the same slide; each moved shape keeps
+        its position, size, rotation, and flips on the slide, compensating for any scaling,
+        rotation, or flips contributed by the group it is removed from. Raises
+        :class:`~pptx.exc.UnrepresentableTransformError` if that adjustment
+        would require shear, which a shape transform cannot express.
+
+        The group a shape is removed from is left unchanged; in particular its extents are
+        not recalculated, so its remaining member shapes keep their positions. Without
+        `shapes`, the group shape is empty and must be populated using methods on its shape
+        tree, available on its `.shapes` property. The position and extents of the group
+        shape are determined by the shapes it contains.
         """
         shapes = tuple(shapes)
+        self._validate_groupable(shapes)
+        # ---compute all new transforms before mutating anything, so a failure
+        #    leaves the slide unchanged---
+        xfrm_values = [new_xfrm_values(shape.element, self._element) for shape in shapes]
         grpSp = self._element.add_grpSp()
-        for shape in shapes:
+        for shape, values in zip(shapes, xfrm_values):
+            apply_xfrm_values(shape.element, values)
             grpSp.insert_element_before(
                 shape._element, "p:extLst"  # pyright: ignore[reportPrivateUsage]
             )
         if shapes:
-            grpSp.recalculate_extents()
+            grpSp.normalize_extents()
         return cast(GroupShape, self._shape_factory(grpSp))
 
     def add_ole_object(
@@ -426,6 +440,48 @@ class _BaseGroupShapes(_BaseShapes):
         shape_elms = list(self._element.iter_shape_elms())
         return shape_elms.index(shape.element)
 
+    def reparent(self, shape: BaseShape) -> BaseShape:
+        """Move `shape` into this shape tree, preserving its on-slide appearance.
+
+        The shape's offset, extents, rotation, and flips are adjusted to compensate
+        for any offset, scaling (`chOff`/`chExt`), rotation, and flips contributed by
+        the group(s) it is removed from and the group it is added to, so its geometry
+        on the slide is unchanged. The shape keeps its shape id, and connector
+        end-point bindings (`stCxn`/`endCxn`) referring to it remain valid.
+
+        Raises :class:`~pptx.exc.UnrepresentableTransformError` if the
+        required transform includes shear, which cannot be expressed by a shape's
+        `a:xfrm`; the slide is left unchanged in that case. Raises |ValueError| if
+        `shape` belongs to a different slide.
+
+        The group the shape is removed from is left unchanged; in particular its
+        extents are not recalculated, so its remaining member shapes keep their
+        positions. If that leaves an empty group, it remains in place and can be
+        removed with :meth:`ungroup`.
+        """
+        self._validate_reparentable(shape)
+        reparent_element(shape.element, self._element)
+        return self._shape_factory(shape.element)
+
+    def ungroup(self, group_shape: GroupShape) -> list[BaseShape]:
+        """Move all members of `group_shape` into this shape tree and remove the group.
+
+        Each member shape keeps its position, size, rotation, and flips on the slide;
+        see :meth:`reparent` for details. The (then empty) group shape is removed from
+        the slide. An empty group is simply removed. Returns the moved shapes in their
+        original order.
+        """
+        self._validate_same_slide((group_shape,))
+        member_elms = list(group_shape.element.iter_shape_elms())
+        # ---compute all new transforms before mutating anything, so a failure
+        #    leaves the slide unchanged---
+        xfrm_values = [new_xfrm_values(elm, self._element) for elm in member_elms]
+        for elm, values in zip(member_elms, xfrm_values):
+            apply_xfrm_values(elm, values)
+            self._element.insert_element_before(elm, "p:extLst")
+        group_shape.element.getparent().remove(group_shape.element)
+        return [self._shape_factory(elm) for elm in member_elms]
+
     def _add_chart_graphicFrame(
         self, rId: str, x: Length, y: Length, cx: Length, cy: Length
     ) -> CT_GraphicalObjectFrame:
@@ -517,6 +573,33 @@ class _BaseGroupShapes(_BaseShapes):
         # ---default behavior is to do nothing, GroupShapes overrides to
         #    produce the distinctive behavior of groups and subgroups.---
         pass
+
+    def _validate_groupable(self, shapes: tuple[BaseShape, ...]) -> None:
+        """Raise if `shapes` cannot be moved into a new group in this shape tree."""
+        self._validate_same_slide(shapes)
+        elms = [shape.element for shape in shapes]
+        for elm in elms:
+            node = elm.getparent()
+            while node is not None:
+                if any(node is other for other in elms):
+                    raise ValueError("cannot group a shape together with its own ancestor group")
+                node = node.getparent()
+
+    def _validate_reparentable(self, shape: BaseShape) -> None:
+        """Raise if `shape` cannot be moved into this shape tree."""
+        self._validate_same_slide((shape,))
+        node = self._element
+        while node is not None:
+            if node is shape.element:
+                raise ValueError("cannot reparent a group into itself or its descendant")
+            node = node.getparent()
+
+    def _validate_same_slide(self, shapes: tuple[BaseShape, ...]) -> None:
+        """Raise if any of `shapes` does not belong to the same slide as this tree."""
+        root = self._element.getroottree().getroot()
+        for shape in shapes:
+            if shape.element.getroottree().getroot() is not root:
+                raise ValueError("shape belongs to a different slide")
 
 
 class GroupShapes(_BaseGroupShapes):

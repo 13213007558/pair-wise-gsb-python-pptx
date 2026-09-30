@@ -205,6 +205,22 @@ class CT_GroupShape(BaseShapeElement):
         self.chExt.cy = self.cy = cy
         self.getparent().recalculate_extents()
 
+    def normalize_extents(self) -> None:
+        """Set off/ext and chOff/chExt to exactly bound the contained shapes.
+
+        Unlike `recalculate_extents`, this does not propagate to ancestor
+        groups, so the geometry of shapes outside this group is never disturbed.
+        """
+        if self.tag != qn("p:grpSp"):
+            return
+
+        x, y, cx, cy = self._child_extents
+
+        self.chOff.x = self.x = x
+        self.chOff.y = self.y = y
+        self.chExt.cx = self.cx = cx
+        self.chExt.cy = self.cy = cy
+
     @property
     def xfrm(self) -> CT_Transform2D | None:
         """The `a:xfrm` grandchild element or |None| if not found."""

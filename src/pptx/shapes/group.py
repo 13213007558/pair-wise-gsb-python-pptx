@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from pptx.dml.effect import ShadowFormat
 from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -12,7 +12,7 @@ from pptx.util import lazyproperty
 if TYPE_CHECKING:
     from pptx.action import ActionSetting
     from pptx.oxml.shapes.groupshape import CT_GroupShape
-    from pptx.shapes.shapetree import GroupShapes
+    from pptx.shapes.shapetree import GroupShapes, _BaseGroupShapes
     from pptx.types import ProvidesPart
 
 
@@ -67,3 +67,14 @@ class GroupShape(BaseShape):
         from pptx.shapes.shapetree import GroupShapes
 
         return GroupShapes(self._element, self)
+
+    def ungroup(self) -> list[BaseShape]:
+        """Move all member shapes into the parent shape tree and remove this group.
+
+        Each member shape keeps its position, size, rotation, and flips on the slide;
+        see :meth:`pptx.shapes.shapetree._BaseGroupShapes.reparent` for details. An
+        empty group is simply removed. Returns the moved shapes in their original
+        order.
+        """
+        parent_shapes = cast("_BaseGroupShapes", self._parent)
+        return parent_shapes.ungroup(self)
